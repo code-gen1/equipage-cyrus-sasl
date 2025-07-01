@@ -26,7 +26,7 @@ import os
 from proton import Message, symbol
 from proton.handlers import MessagingHandler
 from proton.reactor import Container, SenderOption
-from proton import SSLDomain, SSLException
+from proton import SSLDomain, SSLException, SASL
 
 class SecureSendHandler(MessagingHandler):
     def __init__(self, conn_url, address, message_body, auth_mode="ANONYMOUS"):
@@ -43,7 +43,7 @@ class SecureSendHandler(MessagingHandler):
 
     def on_start(self, event):
         try:
-            print("SECURE-SEND: Starting SSL configuration...")
+            print("SECURE-SEND: Starting SSL and Cyrus SASL configuration...")
 
             # Configure SSL domain with client certificates
             ssl_domain = SSLDomain(SSLDomain.MODE_CLIENT)
@@ -73,22 +73,76 @@ class SecureSendHandler(MessagingHandler):
             print("SECURE-SEND: set_peer_authentication(VERIFY_PEER) returned: {0}".format(result))
 
             self.container = event.container
-            print("SECURE-SEND: Connecting to {0} with SSL and {1} auth...".format(self.url, self.auth_mode))
+            print("SECURE-SEND: Connecting to {0} with SSL and Cyrus SASL {1} auth...".format(self.url, self.auth_mode))
 
-            # Try connection with specified authentication mechanism
+            # Prepare connection properties for Solace PubSub+ compatibility
+            connection_properties = {
+                'product': 'qpid-proton-python-cyrus-sasl',
+                'version': '1.0',
+                'platform': 'Python'
+            }
+
+            # Create connection with appropriate authentication parameters
             if self.auth_mode == "EXTERNAL":
-                self.conn = event.container.connect(self.url, ssl_domain=ssl_domain, allowed_mechs="EXTERNAL")
+                print("SECURE-SEND: Creating connection with EXTERNAL SASL mechanism")
+                self.conn = event.container.connect(
+                    self.url,
+                    ssl_domain=ssl_domain,
+                    allowed_mechs="EXTERNAL",
+                    properties=connection_properties
+                )
+
             elif self.auth_mode == "PLAIN":
+                print("SECURE-SEND: Creating connection with PLAIN SASL mechanism")
                 # Use certificate CN as username for PLAIN authentication
-                self.conn = event.container.connect(self.url, ssl_domain=ssl_domain,
-                                                   user="jcsmp-client", password="",
-                                                   allowed_mechs="PLAIN")
+                username = "jcsmp-client"  # This should match the certificate CN
+                password = ""  # Empty password for certificate-based auth
+                self.conn = event.container.connect(
+                    self.url,
+                    ssl_domain=ssl_domain,
+                    user=username,
+                    password=password,
+                    allowed_mechs="PLAIN",
+                    properties=connection_properties
+                )
+                print("SECURE-SEND: PLAIN auth configured with username: {0}".format(username))
+
             elif self.auth_mode == "ANONYMOUS":
-                self.conn = event.container.connect(self.url, ssl_domain=ssl_domain,
-                                                   allowed_mechs="ANONYMOUS")
+                print("SECURE-SEND: Creating connection with ANONYMOUS SASL mechanism")
+                self.conn = event.container.connect(
+                    self.url,
+                    ssl_domain=ssl_domain,
+                    allowed_mechs="ANONYMOUS",
+                    properties=connection_properties
+                )
+
             else:
                 # Auto-detect available mechanisms
-                self.conn = event.container.connect(self.url, ssl_domain=ssl_domain)
+                print("SECURE-SEND: Creating connection with auto-detected SASL mechanisms")
+                self.conn = event.container.connect(
+                    self.url,
+                    ssl_domain=ssl_domain,
+                    properties=connection_properties
+                )
+
+            # Configure Cyrus SASL after connection creation
+            print("SECURE-SEND: Configuring Cyrus SASL post-connection...")
+            transport = self.conn.transport
+            sasl = transport.sasl()
+
+            # Set SASL configuration name for client (Cyrus SASL configuration)
+            sasl.config_name("proton-client")
+            print("SECURE-SEND: SASL config name set to 'proton-client'")
+
+            # Set SASL configuration path (can be overridden by PN_SASL_CONFIG_PATH env var)
+            sasl_config_path = os.environ.get('PN_SASL_CONFIG_PATH', '/etc/sasl2:/usr/lib/sasl2')
+            sasl.config_path(sasl_config_path)
+            print("SECURE-SEND: SASL config path set to: {0}".format(sasl_config_path))
+
+            # Allow insecure mechanisms over SSL/TLS for PLAIN authentication
+            if self.auth_mode in ["PLAIN", "AUTO"]:
+                sasl.allow_insecure_mechs = True
+                print("SECURE-SEND: Insecure SASL mechanisms allowed over SSL/TLS")
 
             print("SECURE-SEND: Connection object created, creating sender...")
 
