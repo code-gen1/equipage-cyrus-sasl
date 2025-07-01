@@ -1,0 +1,3 @@
+[submodule "qpid-proton-source"]
+	path = qpid-proton-source
+	url = https://github.com/apache/qpid-proton.git
